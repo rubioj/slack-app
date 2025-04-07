@@ -48,4 +48,4 @@ coverage.xml
 .vscode/
 
 # Miscellaneous
-*.log
+*.logbot_token.env
