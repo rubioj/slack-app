@@ -49,3 +49,6 @@ coverage.xml
 
 # Miscellaneous
 *bot_token.env
+.env
+# CSV files
+*.csv
