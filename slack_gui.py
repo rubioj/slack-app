@@ -7,6 +7,8 @@ from datetime import datetime
 import csv
 import re
 from dotenv import load_dotenv
+import requests
+from pathlib import Path
 
 class SlackMessagesGUI:
     def __init__(self, root):
@@ -21,8 +23,8 @@ class SlackMessagesGUI:
             return
             
         self.root = root
-        self.root.title("Slack Messages Exporter")
-        self.root.geometry("500x250")
+        self.root.title("Slack Channel Exporter")
+        self.root.geometry("500x300")
         
         # Configure style
         style = ttk.Style()
@@ -39,17 +41,25 @@ class SlackMessagesGUI:
         self.channel_entry = ttk.Entry(main_frame, textvariable=self.channel_var, width=40)
         self.channel_entry.grid(row=0, column=1, columnspan=2, padx=5, pady=5, sticky=tk.W)
         
-        # Number of messages input
-        ttk.Label(main_frame, text="Number of messages:").grid(row=1, column=0, sticky=tk.W)
-        self.msg_count_var = tk.StringVar(value="20")
-        self.msg_count_entry = ttk.Entry(main_frame, textvariable=self.msg_count_var, width=10)
-        self.msg_count_entry.grid(row=1, column=1, padx=5, pady=5, sticky=tk.W)
+        # Number of messages/files input
+        ttk.Label(main_frame, text="Number of items:").grid(row=1, column=0, sticky=tk.W)
+        self.count_var = tk.StringVar(value="20")
+        self.count_entry = ttk.Entry(main_frame, textvariable=self.count_var, width=10)
+        self.count_entry.grid(row=1, column=1, padx=5, pady=5, sticky=tk.W)
         
-        # Export button
-        self.export_button = ttk.Button(main_frame, text="Export Messages", command=self.export_messages)
-        self.export_button.grid(row=2, column=0, columnspan=3, pady=20)
+        # Create a frame for buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=2, column=0, columnspan=3, pady=20)
         
-        # Progress bar (hidden by default)
+        # Export Messages button
+        self.export_button = ttk.Button(button_frame, text="Export Messages", command=self.export_messages)
+        self.export_button.grid(row=0, column=0, padx=5)
+        
+        # Download Files button
+        self.download_button = ttk.Button(button_frame, text="Download Files", command=self.download_files)
+        self.download_button.grid(row=0, column=1, padx=5)
+        
+        # Progress bar
         self.progress_var = tk.DoubleVar()
         self.progress_bar = ttk.Progressbar(
             main_frame,
@@ -60,7 +70,7 @@ class SlackMessagesGUI:
         self.progress_bar.grid(row=3, column=0, columnspan=3, sticky=(tk.W, tk.E), padx=5, pady=5)
         self.progress_bar.grid_remove()
         
-        # Status label (hidden by default)
+        # Status label
         self.status_var = tk.StringVar(value="")
         self.status_label = ttk.Label(
             main_frame,
@@ -79,16 +89,18 @@ class SlackMessagesGUI:
         self.progress_bar.grid()
         self.progress_bar.start(10)
         self.export_button.state(['disabled'])
+        self.download_button.state(['disabled'])
         self.channel_entry.state(['disabled'])
-        self.msg_count_entry.state(['disabled'])
+        self.count_entry.state(['disabled'])
 
     def stop_progress(self):
         """Stop and hide the progress bar"""
         self.progress_bar.stop()
         self.progress_bar.grid_remove()
         self.export_button.state(['!disabled'])
+        self.download_button.state(['!disabled'])
         self.channel_entry.state(['!disabled'])
-        self.msg_count_entry.state(['!disabled'])
+        self.count_entry.state(['!disabled'])
         self.status_var.set("")
 
     def update_status(self, message):
@@ -118,7 +130,7 @@ class SlackMessagesGUI:
         # Get channel ID and message count
         channel_id = self.channel_var.get().strip()
         try:
-            msg_count = int(self.msg_count_var.get())
+            msg_count = int(self.count_var.get())
         except ValueError:
             messagebox.showerror("Error", "Please enter a valid number of messages")
             return
@@ -187,6 +199,93 @@ class SlackMessagesGUI:
             else:
                 self.stop_progress()
                 messagebox.showinfo("Info", "No messages found in the channel.")
+                
+        except SlackApiError as e:
+            self.stop_progress()
+            error_message = f"Slack API Error: {e.response['error']}"
+            messagebox.showerror("Error", error_message)
+        except Exception as e:
+            self.stop_progress()
+            error_message = f"An error occurred: {str(e)}"
+            messagebox.showerror("Error", error_message)
+
+    def download_files(self):
+        """Download files shared in the Slack channel"""
+        channel_id = self.channel_var.get().strip()
+        try:
+            limit = int(self.count_var.get())
+        except ValueError:
+            messagebox.showerror("Error", "Please enter a valid number")
+            return
+        
+        if not channel_id:
+            messagebox.showerror("Error", "Please enter a channel ID")
+            return
+        
+        try:
+            self.start_progress()
+            self.update_status("Connecting to Slack...")
+            
+            client = WebClient(token=self.slack_token)
+            
+            # Create downloads directory if it doesn't exist
+            downloads_dir = Path("slack_downloads")
+            downloads_dir.mkdir(exist_ok=True)
+            
+            # Get channel history
+            self.update_status("Fetching channel history...")
+            result = client.conversations_history(
+                channel=channel_id,
+                limit=limit
+            )
+            
+            if not result["messages"]:
+                self.stop_progress()
+                messagebox.showinfo("Info", "No messages found in the channel.")
+                return
+            
+            # Track downloaded files
+            downloaded_files = []
+            
+            # Process messages
+            for message in result["messages"]:
+                if "files" in message:
+                    for file in message["files"]:
+                        try:
+                            # Get file info
+                            file_name = file.get("name", "unknown_file")
+                            file_url = file.get("url_private_download") or file.get("url_private")
+                            
+                            if file_url:
+                                self.update_status(f"Downloading: {file_name}")
+                                
+                                # Download file
+                                response = requests.get(
+                                    file_url,
+                                    headers={"Authorization": f"Bearer {self.slack_token}"},
+                                    stream=True
+                                )
+                                response.raise_for_status()
+                                
+                                # Save file
+                                file_path = downloads_dir / file_name
+                                with open(file_path, 'wb') as f:
+                                    for chunk in response.iter_content(chunk_size=8192):
+                                        if chunk:
+                                            f.write(chunk)
+                                
+                                downloaded_files.append(file_name)
+                                
+                        except Exception as e:
+                            print(f"Error downloading {file_name}: {str(e)}")
+            
+            self.stop_progress()
+            
+            if downloaded_files:
+                message = f"Downloaded {len(downloaded_files)} files to {downloads_dir}"
+                messagebox.showinfo("Success", message)
+            else:
+                messagebox.showinfo("Info", "No files found in the recent messages.")
                 
         except SlackApiError as e:
             self.stop_progress()
